@@ -1,6 +1,7 @@
 import os, time
 from typing import Callable, List
 from tqdm import tqdm
+from glob import glob
 
 from utils.hook import Hook
 
@@ -183,7 +184,7 @@ class Illusion(object):
             masks = self.objective_fn.activation_map(layer_out.detach().clone(), reduction=reduction, threshold=threshold)
             image = image*masks
         else:
-            masks = self.objective_fn.activation_map(layer_out.detach().clone(), reduction=0.0, threshold=0.01)
+            masks = self.objective_fn.activation_map(layer_out.detach().clone(), reduction=0.0, threshold=0.1)
 
         return image, activations, masks
     
@@ -257,6 +258,9 @@ class Illusion(object):
         quiet=False,
         thresholding=True,
         class_idx=None,
+        out_path=False,
+        reduction=0.5,
+        threshold=0.5,
     ):
         """Class-oriented neuron visualization
         Conditioning on a class label most activated by a neuron to be investigated.
@@ -281,13 +285,34 @@ class Illusion(object):
                 neuron_idx, batch_size, class_indices=class_idx)
             
             # Generate CLIP-Illusion
-            images, acts, masks = self.optimize_caption_and_dream(layer, batch_size=batch_size, color_aug=color_aug, \
-                                    thresholding=thresholding, lr=lr, weight_decay=weight_decay, iters=iters, texts=class_names, quiet=quiet)
+            images, acts, masks = self.optimize_caption_and_dream(layer, batch_size=batch_size, color_aug=color_aug, reduction=reduction, \
+                                                        threshold=threshold, thresholding=thresholding, lr=lr, weight_decay=weight_decay, \
+                                                        iters=iters, texts=class_names, quiet=quiet)
             
             dh.save_illusion_results(images if thresholding else images*masks, acts, dir_name, neuron_idx, class_name=" | ".join(class_names))
             
             viz_out.append(images.detach())
             act_out.append(acts.squeeze(-1).detach())
             mask_out.append(masks.detach())
+            
+        viz_out = torch.cat(viz_out)
+        act_out = torch.cat(act_out)
+        mask_out = torch.cat(mask_out)
         
-        return torch.cat(viz_out), torch.cat(act_out), torch.cat(mask_out)
+        if out_path:
+            preds = self.model(self.postprocess(viz_out))
+            preds = preds.argmax(dim=-1)
+            class_mask = torch.eq(preds, class_idx[0])
+            paths = []
+            for neuron_idx in target_neurons:
+                dir_name = f"{experiment_folder}/{neuron_idx}"
+                paths.extend(glob(f"{dir_name}/*.jpg"))
+            
+            viz_paths = []
+            for n in range(class_mask.shape[0]):
+                if class_mask[n]:
+                    viz_paths.append(paths[n])
+            
+            return viz_paths
+        
+        return viz_out, act_out, mask_out

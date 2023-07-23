@@ -104,7 +104,7 @@ def select_spurious_attribute(model, illusion, images, acts, masks, cor_feats, i
         
         selected = torch.logical_or(ratio < 0.95, acts==0.0)
         if selected.sum()==0:
-            _, index = torch.topk(ratio, dim=0, largest=False, k=3)
+            _, index = torch.topk(ratio, dim=0, largest=False, k=1)
             selected[index] = True
                         
         return selected
@@ -168,12 +168,14 @@ if __name__=="__main__":
     print(" Rank    ID  Prec@5 %  Importance")
     print("--------------------------------")
     skip = 0
+    neg_n_id = []
     for r, (n_id, v) in enumerate(total_topk_neg.items()):
         if n_id in pos_ids:
             skip+=1
             continue
         if r >= 15:
             break
+        neg_n_id.append(n_id)
         print("Top-%d: %4d  %2.3f   %.4f" % (r+1-skip, n_id, v, imp[n_id]))
     print("--------------------------------\n")
         
@@ -248,11 +250,31 @@ if __name__=="__main__":
             
             gamma = (min([imp[n_id] for n_id in args.neurons])-1)/3 + 1
             print(gamma)
-            
+                        
             # Edit decision
             ill_batch_size = args.batch_size
             args.batch_size = args.test_batch_size
-            train_loader, valid_loader, optimizer, scheduler, neuron_mask = prepare_editing(model, args)
+            
+            cmd = input(">> Do you want to add excessive features? (y/n): ")
+            viz_paths = None
+            if cmd.strip()=="y":
+                viz_paths = illusion.visualize_neurons(
+                    experiment_name=exp_name,
+                    target_neurons=neg_n_id[:5],
+                    layer=model.layer4,
+                    iters=args.iters,
+                    lr=9e-3,
+                    batch_size=ill_batch_size,
+                    weight_decay=2e-4,
+                    class_idx=cond_class,
+                    thresholding=True,
+                    reduction=1.0, threshold=0.0,
+                    quiet=True,
+                    out_path=True
+                )
+                print(f"> {len(viz_paths)} samples are added in training data")
+                
+            train_loader, valid_loader, optimizer, scheduler, neuron_mask = prepare_editing(model, args, viz_paths=viz_paths)
             new_ckpt_path = train_model(train_loader, valid_loader, model, optimizer, ckpt_dir, lambda3, gamma, num_epochs,\
                                     scheduler=scheduler, device=args.device, mod_class=args.class_idx, neuron_mask=neuron_mask)
             print("Best checkpoint -", new_ckpt_path)

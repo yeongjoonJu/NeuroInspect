@@ -257,8 +257,11 @@ def train_model(train_loader, val_loader, model, optimizer, ckpt_dir, lambda3, \
             
     return ckpt_path
 
-def prepare_editing(model, args):
+def prepare_editing(model, args, viz_paths=None):
     train_dataset, valid_dataset, _ = load_datasets(args.dataset, args.data_dir, args.download_data)
+    if viz_paths is not None:
+        train_dataset._image_files.extend(viz_paths)
+        train_dataset._labels.extend([args.class_idx for _ in range(len(viz_paths))])
     train_loader = torch.utils.data.DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True, num_workers=4)
     valid_loader = torch.utils.data.DataLoader(valid_dataset, batch_size=args.batch_size, shuffle=False, num_workers=4)
     
