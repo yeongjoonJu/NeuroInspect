@@ -14,6 +14,7 @@ import utils.dir_handler as dh
 from utils.params import ImageParams
 from utils.prompts import prepare_class_names
 from utils.config import revised_prompt_templates
+from utils.objectives import ClassConditionalObjective, ChannelObjective
 
 # import clip
 import open_clip
@@ -121,7 +122,7 @@ class Illusion(object):
         return target_text_feats.unsqueeze(0)
 
     
-    def optimize_caption_and_dream(self, layer, color_aug=False, init_image=None, thresholding=True, \
+    def optimize_caption_and_dream(self, layer, is_vit=False, init_image=None, thresholding=True, \
                                 lr=9e-3, weight_decay=1e-3, iters=1024, texts=["image"],\
                                 quiet=False, threshold=0.5, reduction=0.5, batch_size=1):
 
@@ -152,22 +153,21 @@ class Illusion(object):
             logits = self.model(self.postprocess(image))
             layer_out = hook.output
 
-            if color_aug:
-                layer_out = layer_out[:, 0]
-            else:
+            if not is_vit:
                 B,C,_,_ = layer_out.shape
                 layer_out = layer_out.view(B,C,-1).mean(dim=-1)
             
-            loss = self.objective_fn(layer_out, logits, \
-                                    img_feats, target_text_feats)
-            
+            if type(self.objective_fn) is ClassConditionalObjective:
+                loss = self.objective_fn(layer_out, logits, img_feats, target_text_feats)
+            else:
+                loss = self.objective_fn(layer_out, logits)
             
             tqdm_obj.set_postfix(loss=loss.item(), lr=img_param.get_lr())
             
             loss.backward()
             img_param.optimizer.step()
             img_param.lr_scheduler.step()
-
+            
         image = img_param.to_chw_tensor().detach()
         self.model(self.postprocess(image))
         layer_out = hook.output
@@ -184,7 +184,7 @@ class Illusion(object):
             masks = self.objective_fn.activation_map(layer_out.detach().clone(), reduction=reduction, threshold=threshold)
             image = image*masks
         else:
-            masks = self.objective_fn.activation_map(layer_out.detach().clone(), reduction=0.0, threshold=0.1)
+            masks = self.objective_fn.activation_map(layer_out.detach().clone(), reduction=0.0, threshold=0.25)
 
         return image, activations, masks
     
@@ -224,24 +224,33 @@ class Illusion(object):
         class_idx,
         batch_size=1,
         target_neurons=None, # List or LongTensor
+        obj_func=None
     ):
+        if obj_func is None:
+            obj_func = self.objective_fn
+            
         if target_neurons is not None:
             batch_size = len(target_neurons)
             
         # set neuron idx
         if target_neurons is None:
             target_neurons = torch.topk(self.decision.weight.data[class_idx], k=batch_size, dim=0, largest=True)[1]
+        elif type(target_neurons) is list:
+            target_neurons = torch.LongTensor(target_neurons)
         
-        self.objective_fn.channel_number = target_neurons.to(self.device)
+        obj_func.channel_number = target_neurons.to(self.device)
         
         # set class idx
         class_indices = torch.LongTensor([class_idx for _ in range(batch_size)]).to(self.device)
-        self.objective_fn.class_idx = class_indices
+        obj_func.class_idx = class_indices
         
         # Generate Feature
         class_names = prepare_class_names(class_indices, self.class_dict)
         
-        return class_names
+        if self.objective_fn==obj_func:
+            return class_names
+        else:
+            return obj_func, class_names
         
     
     def visualize_neurons(
@@ -254,7 +263,7 @@ class Illusion(object):
         batch_size=1,
         weight_decay=0.0,
         overwrite_experiment=True,
-        color_aug=False,
+        is_vit=False,
         quiet=False,
         thresholding=True,
         class_idx=None,
@@ -285,11 +294,11 @@ class Illusion(object):
                 neuron_idx, batch_size, class_indices=class_idx)
             
             # Generate CLIP-Illusion
-            images, acts, masks = self.optimize_caption_and_dream(layer, batch_size=batch_size, color_aug=color_aug, reduction=reduction, \
+            images, acts, masks = self.optimize_caption_and_dream(layer, batch_size=batch_size, is_vit=is_vit, reduction=reduction, \
                                                         threshold=threshold, thresholding=thresholding, lr=lr, weight_decay=weight_decay, \
                                                         iters=iters, texts=class_names, quiet=quiet)
             
-            dh.save_illusion_results(images if thresholding else images*masks, acts, dir_name, neuron_idx, class_name=" | ".join(class_names))
+            dh.save_illusion_results(images if thresholding else images*masks.clamp(min=0.5), acts, dir_name, neuron_idx, class_name=" | ".join(class_names))
             
             viz_out.append(images.detach())
             act_out.append(acts.squeeze(-1).detach())
@@ -316,3 +325,52 @@ class Illusion(object):
             return viz_paths
         
         return viz_out, act_out, mask_out
+    
+    
+    def get_neuron_concepts(self, neuron_ids, class_idx, layer, norm=True, \
+                            max_iter=450, lr=9e-3, eta_min=1e-3, weight_decay=1e-4,):
+        image_size = self.objective_fn.image_size
+        obj = ChannelObjective(image_size=image_size)
+        obj, _ = self.set_multiple_neurons_one_class_in_batch(class_idx, target_neurons=neuron_ids, obj_func=obj)
+        img_param = ImageParams(image_size=image_size, batch_size=len(neuron_ids), device=self.device, max_iter=max_iter, \
+                            scale_min=0.6, scale_max=1.2, rotate_degrees=15, translate_x=0.15, translate_y=0.15, color_aug=False)
+        hook = Hook(layer)
+        img_param.get_optimizer_and_scheduler(param_list=img_param.get_param_list(), lr=lr, weight_decay=weight_decay, warmup=False, eta_min=eta_min)
+        
+        # Visualization
+        tqdm_obj = tqdm(range(max_iter), disable=False, total=max_iter)
+        for t in tqdm_obj:
+            img_param.optimizer.zero_grad()
+
+            image = img_param(training=True)
+            
+            logits = self.model(self.postprocess(image))
+            layer_out = hook.output
+
+            B,C,_,_ = layer_out.shape
+            layer_out = layer_out.view(B,C,-1).mean(dim=-1)
+            loss = obj(layer_out, logits)
+            
+            tqdm_obj.set_postfix(loss=loss.item(), lr=img_param.get_lr())
+            
+            loss.backward()
+            img_param.optimizer.step()
+            img_param.lr_scheduler.step()
+        
+        with torch.no_grad():
+            image = img_param.to_chw_tensor().detach()
+            self.model(self.postprocess(image))
+            layer_out = hook.output
+            hook.close()
+            image = image.detach()
+            masks = self.objective_fn.activation_map(layer_out.detach().clone(), reduction=0.0, threshold=0.25)
+            image = image*masks
+            
+            features = self.model.forward_features(self.postprocess(image))
+            B,C,_,_ = features.shape
+            features = features.view(B,C,-1).mean(dim=-1)
+            if norm:
+                features = features / features.norm(dim=-1, keepdim=True)
+
+        return features
+        

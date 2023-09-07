@@ -30,16 +30,16 @@ def get_feature_importance(features, decision, class_idx, embed_dim, device):
 
     return retaining_ratio[0]
 
-def inspect_mistakes_in_class(class_idx, loader, img_filelist, model, device):
+def inspect_mistakes_in_class(class_idx, num_classes, loader, img_filelist, model, device, decision=None):
     model.eval()
     tqdm_loader = tqdm(enumerate(loader), desc="Evaluating")
     
     # Initialize dictionary for storing class-wise accuracy and count
     mistakes = []
+    mislabels = []
     agg_features = None
-    inc_features = []
-    cor_features = []
     n_samples = 0
+    class_features = {}
     
     with torch.no_grad():
         for idx, (inputs, labels) in tqdm_loader:
@@ -56,9 +56,15 @@ def inspect_mistakes_in_class(class_idx, loader, img_filelist, model, device):
             indices = torch.arange(idx*loader.batch_size, end_idx)
             incorrect = torch.logical_and(preds!=labels, labels==class_idx).cpu()
             mistakes.extend(indices[incorrect].tolist())
-                    
-            B,C,_,_ = features.shape
-            fl_features = features.view(B, C, -1).mean(-1)
+            mislabels.extend(preds[incorrect].tolist())
+
+            if len(features.shape) == 4:
+                B,C,_,_ = features.shape
+                fl_features = features.view(B, C, -1).mean(-1)
+            else:
+                fl_features = features[:,0]
+                B, C = fl_features.shape
+                
             n_samples += B
             if agg_features is None:
                 agg_features = fl_features.sum(0).detach()
@@ -66,21 +72,34 @@ def inspect_mistakes_in_class(class_idx, loader, img_filelist, model, device):
                 agg_features = agg_features + fl_features.sum(0).detach()
             
             indices = torch.arange(labels.shape[0])
-            inc_feat_samples = fl_features[indices[incorrect]].detach()
-            cor_feat_samples = fl_features[indices[torch.logical_and(preds==labels, labels==class_idx)]].detach()
-            inc_features.append(inc_feat_samples)
-            cor_features.append(cor_feat_samples)
+            for c in range(num_classes):
+                c_feats = fl_features[indices[labels==c]].detach()
+                if c in class_features:
+                    class_features[c]["count"] += c_feats.shape[0]
+                    class_features[c]["features"] += c_feats.sum(0,keepdim=True).detach()
+                else:
+                    class_features[c] = {}
+                    class_features[c]["count"] = c_feats.shape[0]
+                    class_features[c]["features"] = c_feats.sum(0,keepdim=True).detach()
         
     agg_features = agg_features / n_samples
     
     mistake_samples = []
     for idx in mistakes:
-        mistake_samples.append(img_filelist[idx])
+        mistake_samples.append(img_filelist[idx] if len(img_filelist[idx])==1 else img_filelist[idx][0])
+        
+    if decision is None:
+        decision = model.fc
     
-    embed_dim = model.fc.weight.shape[1]
-    imp = get_feature_importance(agg_features.unsqueeze(0), model.fc, class_idx, embed_dim, device)
+    embed_dim = decision.weight.shape[1]
+    imp = get_feature_importance(agg_features.unsqueeze(0), decision, class_idx, embed_dim, device)
     
-    return mistake_samples, imp, torch.cat(inc_features, dim=0), torch.cat(cor_features, dim=0)
+    # Get class-wise features
+    class_representatives = []
+    for c in range(num_classes):
+        class_representatives.append(class_features[c]["features"] / class_features[c]["count"])
+    
+    return mistake_samples, mislabels, imp, class_representatives
     
 
 def vote_topk(adjust_w, neg=False, k=5):

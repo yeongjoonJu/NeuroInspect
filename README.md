@@ -49,7 +49,7 @@ python -m scripts.debug_mistakes_per_class --model [architecture_name] --dataset
 Command:
 ~~~bash
 # Training
-python train_test_classifier.py --model resnet50 --dataset flowers102 --batch_size 128 --lr 2e-3 --eta_min_lr 1e-4 --optim adam --num_epochs 20 --device [device_id]
+python train_test_classifier.py --model resnet50 --dataset flowers102 --batch_size 128 --lr 2e-3 --eta_min_lr 1e-4 --optim adam --num_epochs 20 --device [device_id] --download_data
 
 # Testing
 python train_test_classifier.py --model resnet50 --dataset flowers102 --batch_size 128 --test_only --ckpt_path ckpt/flowers102_resnet50/best_model.pt --device [device_id]
@@ -88,7 +88,7 @@ python -m scripts.debug_mistakes_per_class --model resnet50 --dataset flowers102
 Command:
 ~~~bash
 # Training
-python train_test_classifier.py --model resnet50 --dataset food101 --batch_size 128 --lr 2e-3 --eta_min_lr 1e-4 --optim adam --num_epochs 20 --device [device_id]
+python train_test_classifier.py --model resnet50 --dataset food101 --batch_size 128 --lr 2e-3 --eta_min_lr 1e-4 --optim adam --num_epochs 20 --device [device_id] --download_data
 
 # Testing
 python train_test_classifier.py --model resnet50 --dataset food101 --batch_size 128 --test_only --ckpt_path ckpt/food101_resnet50/best_model.pt --device [device_id]
@@ -106,7 +106,47 @@ Please input "auto" when you select neurons
 
 ~~~bash
 # Debugging
-python -m scripts.debug_mistakes_per_class --model resnet50 --dataset food101 --ckpt_path ckpt/food101_resnet50/best_model.pt --domain food --class_idx 93 --class_gamma 0.65 --domain_eps 0.1
+python -m scripts.debug_mistakes_per_class --model resnet50 --dataset food101 --ckpt_path ckpt/food101_resnet50/best_model.pt --domain food --class_idx 93 --class_gamma 0.6 --domain_eps 0.1
+~~~
+
+**Results**
+| Results    | Val Acc    | Test Acc    | Worst class Acc      |
+| ---------- | ---------- | ----------- | -------------------- |
+| Original   | 79.43%     | 83.51%      | 57.2% (class 93)     |
+| After Edit | **79.56%** | **83.66%** | **56.4%** (class 77) / 60.4% (class 93)|
+
+### Waterbird Dataset (ResNet-50)
+
+**Training Settings:**
+| Hyperparameter | Batch size | LR   | Epochs              | Scheduler         | Optimizer | Weight decay |
+| -------------- | ---------- | ---- | ------------------- | ----------------- | --------- | ------------ |
+| Standard       | 128        | 2e-3 | 20                  | cosine (min 1e-4) | Adam      | 0.0          |
+| Editing (- FC) | 128        | 1e-4 | 20 (patience: 3)    | warmup            | Adam      | 1e-4         |
+
+Command:
+~~~bash
+# Training
+python train_test_classifier.py --model resnet50 --dataset waterbird --batch_size 32 --lr 1e-3 --eta_min_lr 1e-3 --optim adam --num_epochs 300 --weight_decay 1e-4 --device [device_id] --download_data
+
+# Testing
+python train_test_classifier.py --model resnet50 --dataset food101 --batch_size 128 --test_only --ckpt_path ckpt/food101_resnet50/best_model.pt --device [device_id]
+~~~
+
+**Editing Options**
++ $o$: 1.0142 (auto)
++ $\lambda_3$: 0.1
++ Target neurons (auto): 853, 1372, 1022, 563, 661, 2039, 514, 1511
+    > Threshold: 0.95, domain epsilon: 0.1, class gamma: 0.65, batch size: 4 (mean)
+
+Command:
+
+Please input "auto" when you select neurons
+
+~~~bash
+# Debugging
+python -m scripts.debug_mistakes_per_class --model resnet50 --dataset food101 --ckpt_path ckpt/food101_resnet50/best_model.pt --domain food --class_idx 93 --class_gamma 0.65 --domain_eps 0.05
+
+python -m scripts.edit_decision --model resnet50 --dataset food101 --ckpt_path ckpt/food101_resnet50/best_model.pt --domain food --class_gamma 0.65 --domain_eps 0.1 --gamma 1.0 --neurons 853 1372 1022 563 661 2039 514 1511 --modifying_class 93
 ~~~
 
 **Results**
@@ -146,3 +186,4 @@ bash run_editing.sh
 curl -L https://umd.app.box.com/shared/static/eyji8leh2lemhbxovgny9ywc9is53ibr -o salient_imagenet_dataset.zip
 unzip salient_imagenet_dataset
 ~~~
+

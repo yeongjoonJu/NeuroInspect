@@ -60,23 +60,14 @@ class Diversity(ChannelLoss):
     
     def loss(self, x: torch.tensor):
         return self.diversity(x).mean()
-
-
-class ClassConditionalObjective(torch.nn.Module):
-    def __init__(self, channel_number=0, class_idx=0, image_size=224, is_vit=False,\
-                class_gamma=0.5, domain_eps=0.01,): 
+    
+    
+class ChannelObjective(torch.nn.Module):
+    def __init__(self, channel_number=0, class_idx=0, image_size=224, is_vit=False): 
         self.is_vit = is_vit
         self.channel_number = channel_number
-        self.image_size = image_size
         self.class_idx = class_idx
-        self.class_gamma = class_gamma
-        self.domain_eps = domain_eps
-        
-    def clip_loss(self, img_feats, text_feats):
-        loss_clip = img_feats @ text_feats.detach().t()
-        loss_clip = torch.diag(loss_clip)
-        
-        return loss_clip
+        self.image_size = image_size
 
     def forward(self, layer_out, decision_out):
         loss = self.activation(layer_out)
@@ -84,29 +75,20 @@ class ClassConditionalObjective(torch.nn.Module):
             logits = decision_out[:,self.class_idx]
         else:
             logits = torch.gather(decision_out, 1, self.class_idx.view(-1,1))
-            
-        class_adj = loss.clamp(min=0.0, max=1.0)
-            
-        return -1*(loss + logits*self.class_gamma*class_adj)
+        
+        return -1*(loss + logits*0.1)
     
-    def __call__(self, layer_out, decision_out, img_feats, text_feats):
+    def __call__(self, layer_out, decision_out):
         loss = self.forward(layer_out, decision_out)
-        loss_clip = self.clip_loss(img_feats, text_feats)
-        loss_ce = F.cross_entropy(decision_out, self.class_idx, reduction="none")
-        
-        loss = (loss_clip+self.domain_eps)*loss
-        
-        return (loss + loss_ce).mean()
+        return loss.mean()
     
     def activation(self, layer_out):
-        if self.is_vit:
-            channel_out = layer_out[:,0]
-            
         if len(layer_out.shape) > 2:
             channel_out = layer_out.view(layer_out.shape[0], layer_out.shape[1], -1)
             channel_out = channel_out.mean(dim=-1)
         else:
             channel_out = layer_out
+        
         
         if type(self.channel_number) is int:
             channel_out = channel_out[:,self.channel_number]
@@ -114,7 +96,6 @@ class ClassConditionalObjective(torch.nn.Module):
             channel_out = torch.gather(channel_out, 1, self.channel_number.view(-1,1))
         
         return channel_out
-    
     
     def activation_map(self, layer_out, threshold=0.0, reduction=0.25):
         if self.is_vit:
@@ -146,3 +127,38 @@ class ClassConditionalObjective(torch.nn.Module):
         mask[mask==0.0] = reduction
 
         return mask.clamp(0.0,1.0)
+
+
+class ClassConditionalObjective(ChannelObjective):
+    def __init__(self, channel_number=0, class_idx=0, image_size=224, is_vit=False,\
+                class_gamma=0.5, domain_eps=0.01,): 
+        super().__init__(channel_number, class_idx, image_size, is_vit)
+        self.class_gamma = class_gamma
+        self.domain_eps = domain_eps
+        
+    def clip_loss(self, img_feats, text_feats):
+        loss_clip = img_feats @ text_feats.detach().t()
+        loss_clip = torch.diag(loss_clip)
+        
+        return loss_clip
+
+    def forward(self, layer_out, decision_out):
+        loss = self.activation(layer_out)
+        if type(self.class_idx) is int:
+            logits = decision_out[:,self.class_idx]
+        else:
+            logits = torch.gather(decision_out, 1, self.class_idx.view(-1,1))
+            
+        class_adj = self.class_gamma#loss.clamp(min=0.01, max=self.class_gamma)
+            
+        return -1*(loss + logits*class_adj)
+    
+    def __call__(self, layer_out, decision_out, img_feats, text_feats):
+        loss = self.forward(layer_out, decision_out)
+        loss_clip = self.clip_loss(img_feats, text_feats)
+        loss_ce = F.cross_entropy(decision_out, self.class_idx, reduction="none")
+        
+        loss = (loss_clip+self.domain_eps)*loss
+        
+        return (loss + loss_ce).mean()
+        # return loss.mean()

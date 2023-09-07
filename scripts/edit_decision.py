@@ -148,6 +148,7 @@ def config():
     parser.add_argument("--save_dir", type=str, default="results/class_acc")
     
     parser.add_argument("--neurons", nargs="+", type=int, required=True)
+    parser.add_argument("--neg_neurons", nargs="+", type=int, default=None, required=False)
     parser.add_argument("--modifying_class", type=int, required=True)
     parser.add_argument("--gamma", type=float, default=1.0)
     parser.add_argument("--lambda3", type=float, default=0.1)
@@ -169,7 +170,8 @@ def get_warmup_lr_scheduler(optimizer, init_lr, lr_rampdown_length=0.25, lr_ramp
 
 
 def train_model(train_loader, val_loader, model, optimizer, ckpt_dir, lambda3, \
-                gamma, num_epochs, device, scheduler=None, mod_class=None, neuron_mask=None, method="ours"):
+                gamma, num_epochs, device, scheduler=None, mod_class=None, \
+                gamma_neg=None, neuron_mask=None, neg_neuron_mask=None, method="ours"):
     
     num_classes = model.fc.weight.data.shape[0]
     print("num_classes: ", num_classes)
@@ -188,7 +190,7 @@ def train_model(train_loader, val_loader, model, optimizer, ckpt_dir, lambda3, \
     best_val_acc = 0.0
     best_cls_acc = 0.0
     ckpt_path = None
-    patience = 3
+    patience = 10
     patience_counter = 0
 
     for epoch in range(num_epochs):
@@ -205,9 +207,12 @@ def train_model(train_loader, val_loader, model, optimizer, ckpt_dir, lambda3, \
             features = model.forward_features(inputs)
             features = model.global_pool(features)
             outputs = model.fc(features)
-            features_masked = features*neuron_mask.detach()
-
             ce_loss = criterion(outputs, labels)
+            
+            if neuron_mask is not None:
+                features_masked = features*neuron_mask.detach()
+            if neg_neuron_mask is not None:
+                features_neg_masked = features*neg_neuron_mask.detach()
             
             if method=="ours":    
                 # neuron_mask = 1. - neuron_mask
@@ -217,13 +222,19 @@ def train_model(train_loader, val_loader, model, optimizer, ckpt_dir, lambda3, \
                 # l2_loss = torch.norm(contrib, dim=1, p=2).mean()
                 prob = torch.softmax(outputs, dim=1)
                 changed_prob = torch.softmax(model.fc(features_masked), dim=1)
-                retaining_ratio = (prob / (changed_prob+1e-9))
+                retaining_ratio = (prob / (changed_prob+1e-15))
                 
-                l2_loss = torch.norm(retaining_ratio[:,mod_class].mean()-gamma, dim=0, p=1)
-                l2_loss = l2_loss.mean() # sum()
+                l1_loss = torch.norm(retaining_ratio[:,mod_class].mean()-gamma, dim=0, p=1)
                 
-                loss = ce_loss + l2_loss*lambda3
-                tqdm_loader.set_postfix(ce=ce_loss.item(), l2=l2_loss.item())
+                if neg_neuron_mask is not None:
+                    changed_prob_neg = torch.softmax(model.fc(features_neg_masked), dim=1)
+                    retaining_ratio_neg = (prob / (changed_prob_neg+1e-15))
+                    l1_neg_loss = torch.norm(retaining_ratio_neg[:,mod_class].mean()-gamma_neg, dim=0, p=1)
+                    loss = ce_loss + (l1_loss + l1_neg_loss)/2.0 * lambda3
+                    tqdm_loader.set_postfix(ce=ce_loss.item(), l1=l1_loss.item(), l1_neg=l1_neg_loss.item())
+                else:
+                    loss = ce_loss + l1_loss * lambda3
+                    tqdm_loader.set_postfix(ce=ce_loss.item(), l1=l1_loss.item())
             else:
                 loss = ce_loss
                 tqdm_loader.set_postfix(ce=ce_loss.item())
@@ -242,7 +253,7 @@ def train_model(train_loader, val_loader, model, optimizer, ckpt_dir, lambda3, \
         print(f"Val class {mod_class} acc", class_acc[mod_class]*100)
         print(f"Min class acc", min_class_acc*100)
         
-        if val_acc > best_val_acc or (val_acc==best_val_acc and best_cls_acc <= min_class_acc):
+        if val_acc > best_val_acc or (val_acc==best_val_acc and best_cls_acc < min_class_acc):
             best_val_acc = val_acc
             best_cls_acc = min_class_acc
             print("Save checkpoint:", val_acc, class_acc[mod_class], min_class_acc)
@@ -278,10 +289,18 @@ def prepare_editing(model, args, viz_paths=None):
     neuron_mask.index_fill_(0, index, 0)
     neuron_mask = neuron_mask.unsqueeze(0).to(args.device)
     
+    neg_neuron_mask = None
+    if args.neg_neurons is not None:
+        neg_index = torch.LongTensor(args.neg_neurons)
+        neg_neuron_mask = torch.ones(embed_dim)
+        neg_neuron_mask.index_fill_(0, neg_index, 0)
+        neg_neuron_mask = neg_neuron_mask.unsqueeze(0).to(args.device)
+        
     optimizer = optim.Adam(model.fc.parameters(), lr=args.lr, weight_decay=1e-4)
     scheduler = get_warmup_lr_scheduler(optimizer, args.lr)
     
-    return train_loader, valid_loader, optimizer, scheduler, neuron_mask
+    return train_loader, valid_loader, optimizer, scheduler, neuron_mask, neg_neuron_mask
+
 
 def main(args):
     # set seed
@@ -296,11 +315,13 @@ def main(args):
     os.makedirs(ckpt_dir, exist_ok=True)
     
     # prepare training
-    train_loader, valid_loader, optimizer, scheduler, neuron_mask = prepare_editing(model, args)
+    train_loader, valid_loader, optimizer, scheduler, neuron_mask, neg_neuron_mask = prepare_editing(model, args)
     
     # Train the model
-    new_ckpt_path = train_model(train_loader, valid_loader, model, optimizer, ckpt_dir, args.lambda3, args.gamma, args.num_epochs,\
-                args.device, scheduler=scheduler, mod_class=args.modifying_class, neuron_mask=neuron_mask, method=args.method)
+    new_ckpt_path = train_model(train_loader, valid_loader, model, optimizer, ckpt_dir, \
+                                args.lambda3, args.gamma, args.num_epochs,\
+                                args.device, scheduler=scheduler, mod_class=args.modifying_class, \
+                                neuron_mask=neuron_mask, neg_neuron_mask=neg_neuron_mask, method=args.method)
 
     test_dataset, _ = load_test_data(args.dataset, args.data_dir, args.download_data)
     test_loader = torch.utils.data.DataLoader(test_dataset, batch_size=128, shuffle=False, num_workers=4)

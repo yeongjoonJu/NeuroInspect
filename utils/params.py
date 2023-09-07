@@ -20,6 +20,7 @@ class ImageParams(torch.nn.Module):
         
         if init_image is None:
             img_buf = np.random.normal(size=(batch_size, 3, image_size, image_size), scale=std).astype(np.float32)
+            # img_buf = np.zeros((batch_size, 3, image_size, image_size)).astype(np.float32)
             self.spectrum_t = torch.tensor(img_buf).float().to(device)
             self.lucid_space = True
         else:

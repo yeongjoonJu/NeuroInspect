@@ -10,6 +10,7 @@ import torch.optim as optim
 from torchvision.datasets.utils import download_and_extract_archive
 from torchvision.datasets import ImageFolder
 from torchvision import transforms
+from torchvision.datasets import LSUN
 
 from dataset.general import Flowers102, Food101, SUN397, Waterbird
 from dataset.confounder import CelebADataset, CUBDataset, DRODataset
@@ -40,6 +41,7 @@ data_dict = {
     "imagenet": ImageFolder,
     # Lego bricks
     "lego": ImageFolder,
+    "lsun": LSUN,
     "waterbird": Waterbird, "celeba": None
 }
 
@@ -142,7 +144,7 @@ def load_datasets(dataset_name, data_path, download=True, transform=None):
         download_and_split_SUN397(data_path)
         data_path = f"{data_path}/SUN397_split"
         
-    if dataset_name in ["SUN397", "lego"]:
+    if dataset_name in ["SUN397", "lego", "lsun"]:
         # data manual split
         dataset = data_class(data_path, transform=train_transform)
         num_data = len(dataset)
@@ -160,7 +162,7 @@ def load_datasets(dataset_name, data_path, download=True, transform=None):
         if train_dataset.export_valid_meta_data():
             train_dataset = data_class(data_path, split=split_train_str, download=download, transform=train_transform)
         valid_dataset = data_class(data_path, split=split_valid_str, download=download, transform=test_transform)
-        classes = train_dataset.classes        
+        classes = train_dataset.classes
     else:
         train_dataset = data_class(data_path, split=split_train_str, download=download, transform=train_transform)
         valid_dataset = data_class(data_path, split=split_valid_str, download=download, transform=test_transform)
@@ -209,7 +211,7 @@ def load_test_data(dataset_name, data_path, download=True, transform=None, split
     return test_dataset, classes
 
 
-@torch.no_grad()
+
 def eval_loop(loader, model, device, out_mistakes=False):
     model.eval()
     accuracymeter = AverageMeter()
@@ -219,36 +221,38 @@ def eval_loop(loader, model, device, out_mistakes=False):
     class_correct = {}
     class_total = {}
     mistakes = []
+    
+    with torch.no_grad():
+        for idx, batch in tqdm_loader:
+            inputs = batch[0].to(device)
+            labels = batch[1].to(device)
+            outputs = model(inputs)
 
-    for idx, batch in tqdm_loader:
-        inputs = batch[0].to(device)
-        labels = batch[1].to(device)
-        outputs = model(inputs)
+            preds = torch.argmax(outputs, 1)
 
-        preds = torch.argmax(outputs, 1)
-        
-        # Update overall accuracy and loss meters
-        accuracymeter.update((preds == labels).float().mean().cpu().numpy(), inputs.size(0))
-        
-        # Update class-wise accuracy and count
-        for i in range(len(labels)):
-            label = labels[i].item()
-            if label in class_correct:
-                class_correct[label] += (preds[i] == label).float().sum().item()
-                class_total[label] += 1
-            else:
-                class_correct[label] = (preds[i] == label).float().sum().item()
-                class_total[label] = 1
-                
-        if out_mistakes:
-            end_idx = (idx+1)*loader.batch_size
-            if end_idx > len(loader.dataset):
-                end_idx = len(loader.dataset)
-            indices = torch.arange(idx*loader.batch_size, end_idx)
-            incorrect = (preds!=labels).cpu()
-            mistakes.extend(indices[incorrect].tolist())
-        
-        tqdm_loader.set_postfix(Acc=accuracymeter.avg)
+            corrected = (preds == labels).float()
+            # Update overall accuracy and loss meters
+            accuracymeter.update(corrected.mean().cpu().numpy(), inputs.size(0))
+
+            # Update class-wise accuracy and count
+            for label in list(set(batch[1].tolist())):
+                label_mask = labels==label
+                if label in class_correct:
+                    class_correct[label] += corrected[label_mask].sum().item()
+                    class_total[label] += label_mask.float().sum().item()
+                else:
+                    class_correct[label] = corrected[label_mask].sum().item()
+                    class_total[label] = label_mask.float().sum().item()
+                    
+            if out_mistakes:
+                end_idx = (idx+1)*loader.batch_size
+                if end_idx > len(loader.dataset):
+                    end_idx = len(loader.dataset)
+                indices = torch.arange(idx*loader.batch_size, end_idx)
+                incorrect = (preds!=labels).cpu()
+                mistakes.extend(indices[incorrect].tolist())
+            
+            tqdm_loader.set_postfix(Acc=accuracymeter.avg)
     
     # Calculate class-wise accuracy
     class_accuracy = {}
@@ -305,12 +309,10 @@ def test_model(test_loader, model, device):
     return class_accuracy
             
 
-def change_decision_layer(model, num_classes, requires_grad=True):
-    if isinstance(model, nn.DataParallel):
-        model.module.fc = nn.Linear(model.module.fc.in_features, num_classes)
-    else:
-        model.fc = nn.Linear(model.fc.in_features, num_classes)
-    for p in model.fc.parameters():
+def change_decision_layer(model, num_classes, requires_grad=True, is_vit=False):
+    decision = model.head if is_vit else model.fc
+    decision = nn.Linear(decision.in_features, num_classes)
+    for p in decision.parameters():
         p.requires_grad = requires_grad
         
     return model
@@ -329,7 +331,7 @@ if __name__=="__main__":
     parser.add_argument("--optim", type=str, default="adam")
     parser.add_argument("--data_dir", type=str, default="data")
     parser.add_argument("--download_data", action="store_true")
-    parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--seed", type=int, default=77)
     parser.add_argument("--device", type=int, default=0)
     parser.add_argument("--ckpt_dir", type=str, default="ckpt")
     parser.add_argument("--save_dir", type=str, default="results/class_acc")
@@ -354,16 +356,20 @@ if __name__=="__main__":
         # change_decision_layer(model, len(classes), requires_grad=True)
         
         if args.ckpt_path is not None:
-            model = torch.load(args.ckpt_path, map_location=torch.device('cpu'))
+            model = torch.load(args.ckpt_path, map_location=torch.device(args.device))
         else:
-            raise ValueError("Please specify the checkpoint path")
+            # raise ValueError("Please specify the checkpoint path")
+            print("Load pretrained model")
         
         # set model
         model = model.to(args.device)
         model.eval()
         
         class_acc = test_model(test_loader, model, args.device)
-        ckpt_name = "_".join(os.path.basename(args.ckpt_path).split(".")[:-1])
+        if args.ckpt_path is not None:
+            ckpt_name = "_".join(os.path.basename(args.ckpt_path).split(".")[:-1])
+        else:
+            ckpt_name = "pretrained"
         with open(f"{args.save_dir}/{args.dataset}_{args.model}_{ckpt_name}.json", "w") as f:
             json.dump(class_acc, f, indent=2)
     else:
@@ -387,7 +393,7 @@ if __name__=="__main__":
         print("Classes:\n", classes)
             
         # Change the classifier layer
-        change_decision_layer(model, len(classes), requires_grad=True)
+        change_decision_layer(model, len(classes), requires_grad=True, is_vit=args.model.startswith("vit"))
             
         # train model
         model = model.to(args.device)
