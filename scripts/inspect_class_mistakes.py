@@ -86,7 +86,7 @@ def inspect_mistakes_in_class(class_idx, num_classes, loader, img_filelist, mode
     
     mistake_samples = []
     for idx in mistakes:
-        mistake_samples.append(img_filelist[idx] if len(img_filelist[idx])==1 else img_filelist[idx][0])
+        mistake_samples.append(img_filelist[idx][0] if type(img_filelist[idx]) is tuple else img_filelist[idx])
         
     if decision is None:
         decision = model.fc
