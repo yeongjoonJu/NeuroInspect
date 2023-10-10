@@ -30,21 +30,22 @@ def get_feature_importance(features, decision, class_idx, embed_dim, device):
 
     return retaining_ratio[0]
 
-def inspect_mistakes_in_class(class_idx, num_classes, loader, img_filelist, model, device, decision=None):
+def inspect_mistakes_in_class(num_classes, loader, img_filelist, model, device, class_idx=None, decision=None):
     model.eval()
     tqdm_loader = tqdm(enumerate(loader), desc="Evaluating")
     
     # Initialize dictionary for storing class-wise accuracy and count
     mistakes = []
+    correct_labels = []
     mislabels = []
     agg_features = None
     n_samples = 0
     class_features = {}
     
     with torch.no_grad():
-        for idx, (inputs, labels) in tqdm_loader:
-            inputs = inputs.to(device)
-            labels = labels.to(device)
+        for idx, batch in tqdm_loader:
+            inputs = batch[0].to(device)
+            labels = batch[1].to(device)
             features = model.forward_features(inputs)
             outputs = model.forward_head(features)
 
@@ -54,8 +55,12 @@ def inspect_mistakes_in_class(class_idx, num_classes, loader, img_filelist, mode
             if end_idx > len(loader.dataset):
                 end_idx = len(loader.dataset)
             indices = torch.arange(idx*loader.batch_size, end_idx)
-            incorrect = torch.logical_and(preds!=labels, labels==class_idx).cpu()
+            if class_idx is None:
+                incorrect = (preds!=labels).cpu()
+            else:
+                incorrect = torch.logical_and(preds!=labels, labels==class_idx).cpu()
             mistakes.extend(indices[incorrect].tolist())
+            correct_labels.extend(labels[incorrect].tolist())
             mislabels.extend(preds[incorrect].tolist())
 
             if len(features.shape) == 4:
@@ -92,14 +97,16 @@ def inspect_mistakes_in_class(class_idx, num_classes, loader, img_filelist, mode
         decision = model.fc
     
     embed_dim = decision.weight.shape[1]
-    imp = get_feature_importance(agg_features.unsqueeze(0), decision, class_idx, embed_dim, device)
+    imp = None
+    if class_idx is not None:
+        imp = get_feature_importance(agg_features.unsqueeze(0), decision, class_idx, embed_dim, device)
     
     # Get class-wise features
     class_representatives = []
     for c in range(num_classes):
         class_representatives.append(class_features[c]["features"] / class_features[c]["count"])
     
-    return mistake_samples, mislabels, imp, class_representatives
+    return mistake_samples, mislabels, correct_labels, imp, class_representatives
     
 
 def vote_topk(adjust_w, neg=False, k=5):
@@ -108,6 +115,8 @@ def vote_topk(adjust_w, neg=False, k=5):
         vote[f"top-{tk+1}"] = {}
         
     for i in range(adjust_w.shape[0]):
+        if adjust_w[i].sum()==0.0:
+            continue
         _, n_idx = torch.topk(adjust_w[i], k=k, dim=0, sorted=True,
                               largest=False if neg else True)
         for r in range(k):
@@ -121,7 +130,7 @@ def vote_topk(adjust_w, neg=False, k=5):
                 
     return vote
 
-def aggregate_vote(vote, neurons, to_text=False):
+def aggregate_vote(vote, neurons, to_text=False, cut_ratio=3.0):
     total_topk = {}
     for key in vote.keys():
         for n_id, cnt in vote[key].items():
@@ -133,7 +142,7 @@ def aggregate_vote(vote, neurons, to_text=False):
     except_neurons = []
     for n_id in total_topk.keys():
         ratio = total_topk[n_id]/neurons*100
-        if ratio > 3.0:
+        if ratio > cut_ratio:
             total_topk[n_id] = ratio
         else:
             except_neurons.append(n_id)

@@ -21,7 +21,11 @@ def compute_elastic_loss(w, logits, label, alpha=1e-1, beta=1e-2):
         
     return loss
 
-def counterfactual_explanation(wrong_cases, transform, model, pool, decision, device, class_idx):
+def counterfactual_explanation(wrong_cases, transform, model, pool, decision, device, class_idx=None, correct_labels=None, lr=0.01, momentum=0.9):
+    assert class_idx is not None or correct_labels is not None
+    
+    label_idx = class_idx
+    
     total = len(wrong_cases)
     adjust_w = []
     
@@ -30,12 +34,15 @@ def counterfactual_explanation(wrong_cases, transform, model, pool, decision, de
         image = transform(image_pil).unsqueeze(0)
         image = image.to(device)
 
-        label = torch.LongTensor([class_idx]).to(device)
+        if correct_labels is not None:
+            label_idx = correct_labels[i]
+            
+        label = torch.LongTensor([label_idx]).to(device)
 
         # num_classes = model.fc.weight.data.shape[0]
         w = torch.zeros(1, model.num_features).to(device)
         w = torch.nn.Parameter(w, requires_grad=True)
-        optimizer = torch.optim.SGD([w], lr=0.01, momentum=0.9)
+        optimizer = torch.optim.SGD([w], lr=lr, momentum=momentum)
 
         with torch.no_grad():
             features = model.forward_features(image)
@@ -55,16 +62,9 @@ def counterfactual_explanation(wrong_cases, transform, model, pool, decision, de
             features = pool(features)
             revised_features = features + w
             logits = decision(revised_features)
-            # contribution = features * decision.weight # (1,F)x(C,F)
-            # contribution = contribution + w # (C,F)+(C,F)
-            # logits = torch.sum(contribution, dim=1) + decision.bias
-            # logits = logits.unsqueeze(0)
-
-            # logits = torch.matmul(features, (decision.weight*(1+w)).T) # [BxF]x[F,C] -> [B,C]
-            # logits = logits + decision.bias
 
             pred = torch.argmax(logits, dim=1)
-            if pred[0].item()==class_idx:
+            if pred[0].item()==label_idx:
                 break
 
             loss = compute_elastic_loss(w, logits, label)
@@ -77,66 +77,11 @@ def counterfactual_explanation(wrong_cases, transform, model, pool, decision, de
             
             optim_iter += 1
 
-        adjust_w.append(w.data.detach())
+        if optim_iter!=0:
+            adjust_w.append(w.data.detach())
         
         print("\rProgress %.2f Optimizing iteration: %d, top neuron: %d   " % (((i+1)/total)*100, optim_iter, w.data.max(dim=1)[1][0].item()), end="")
     print()
     adjust_w = torch.cat(adjust_w).cpu() # N F
-    
-    return adjust_w
-
-def weighting_concepts(wrong_cases, concepts, class_idx, transform, model, pool, decision, device):
-    total = len(wrong_cases)
-    adjust_w = []
-    num_concepts = len(concepts)
-    
-    for i, image_path in enumerate(wrong_cases):
-        image_pil = Image.open(image_path).convert("RGB")
-        image = transform(image_pil).unsqueeze(0)
-        image = image.to(device)
-
-        label = torch.LongTensor([class_idx]).to(device)
-
-        w = torch.zeros(num_concepts).to(device)
-        w = torch.nn.Parameter(w.view(-1,1), requires_grad=True)
-        optimizer = torch.optim.SGD([w], lr=0.1, momentum=0.9)
-
-        optim_iter = 0
-        while True:
-            optimizer.zero_grad()
-            features = model.forward_features(image)
-            features = pool(features)
-            revised_features = features + (w*concepts).sum()
-            logits = decision(revised_features)
-            # contribution = features * decision.weight # (1,F)x(C,F)
-            # contribution = contribution + w # (C,F)+(C,F)
-            # logits = torch.sum(contribution, dim=1) + decision.bias
-            # logits = logits.unsqueeze(0)
-
-            # logits = torch.matmul(features, (decision.weight*(1+w)).T) # [BxF]x[F,C] -> [B,C]
-            # logits = logits + decision.bias
-
-            pred = torch.argmax(logits, dim=1)
-            probs = torch.softmax(logits, dim=1)
-            if pred==label:
-                break
-            # prev_w = w.data
-            loss = F.cross_entropy(logits, label)#compute_elastic_loss(w, logits, label)
-            loss.backward()
-            optimizer.step()
-            
-            w.grad.zero_()
-            
-            optim_iter += 1
-            
-            if optim_iter > 200:
-                print("failed to converge", probs[:,3])
-                break
-
-        adjust_w.append(w.data.squeeze(-1).detach())
-        
-        print("\rProgress %.2f Optimizing iteration: %d, top neuron: %d   " % (((i+1)/total)*100, optim_iter, w.data.max(dim=1)[1][0].item()), end="")
-    print()
-    adjust_w = torch.stack(adjust_w, dim=0).cpu() 
     
     return adjust_w

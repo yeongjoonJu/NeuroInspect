@@ -3,6 +3,7 @@ from glob import glob
 import shutil, json
 import numpy as np
 from tqdm import tqdm
+from PIL import Image
 import timm
 import torch
 import torch.nn as nn
@@ -18,16 +19,15 @@ from dataset.confounder import CelebADataset, CUBDataset, DRODataset
 from scipy.io import loadmat
 
 confound_dict = {
-    'CelebA':{
-        'constructor': CelebADataset,
-        'target_name': "Blond_Hair",
-        "confounder_names": ["Male"]
-    },
     'waterbird':{
         'constructor': CUBDataset,
         'target_name': "waterbird_complete95",
         "confounder_names": ["forest2water2"]
     },
+}
+    
+confound_data2cls = {
+    "waterbird": ["landbird", "waterbird"],
 }
 
 data_dict = {
@@ -41,23 +41,26 @@ data_dict = {
     "imagenet": ImageFolder,
     # Lego bricks
     "lego": ImageFolder,
-    "lsun": LSUN,
-    "waterbird": Waterbird, "celeba": None
+    "waterbird": None,
 }
 
-def prepare_confounder_data(name: str, root: str):
+def prepare_confounder_data(name: str, root: str, splits=['train', 'val', 'test'], aug=False):
     data_args = confound_dict[name]
     full_dataset = data_args['constructor'](
         root_dir=root,
         target_name=data_args['target_name'],
         confounder_names=data_args['confounder_names'],
-        augment_data=False)
+        augment_data=aug)
 
-    splits = ['train', 'val', 'test']
-    subsets = full_dataset.get_splits(splits)
-    dro_subsets = [DRODataset(subsets[split], process_item_fn=None, n_groups=full_dataset.n_groups,
-                              n_classes=full_dataset.n_classes, group_str_fn=full_dataset.group_str) \
-                   for split in splits]
+    subsets = full_dataset.get_splits(["train", "val", "test"])
+    img_files = full_dataset.get_img_files(["train", "val", "test"])
+
+    dro_subsets = []
+    for split in splits:
+        n_groups = full_dataset.n_groups
+        dro_subsets.append(DRODataset(subsets[split], img_files[split], process_item_fn=None, \
+                n_classes=full_dataset.n_classes, n_groups=n_groups, group_str_fn=full_dataset.group_str))
+            
     return dro_subsets
 
 
@@ -87,7 +90,8 @@ class AverageMeter(object):
         self.sum += val * n
         self.count += n
         self.avg = self.sum / self.count
-        
+
+
 def download_and_split_SUN397(data_dir):
     os.makedirs(f"{data_dir}/SUN397_split/test/SUN397", exist_ok=True)
     if not os.path.exists(f"{data_dir}/SUN397_split/SUN397"):
@@ -113,9 +117,8 @@ def download_and_split_SUN397(data_dir):
             
         shutil.copy(f"{data_dir}/SUN397_split/SUN397/ClassName.txt", f"{data_dir}/SUN397_split/test/SUN397")
     
-    
 
-def load_datasets(dataset_name, data_path, download=True, transform=None):
+def load_datasets(dataset_name, data_path, download=True, transform=None, g_aug=False):
     split_train_str = "train"
     split_valid_str = "valid"
     
@@ -127,13 +130,15 @@ def load_datasets(dataset_name, data_path, download=True, transform=None):
         test_transform = transform
     else:
         train_transform = transforms.Compose([
-            transforms.Resize((224, 224)),
+            transforms.Resize(size=(224,224), interpolation=transforms.InterpolationMode.BILINEAR),
+            # transforms.CenterCrop(size=(224, 224)),
             transforms.RandomAffine(degrees=15, translate=(0.15,0.15)),
-            transforms.ToTensor(),
+            transforms.ToTensor(), 
             transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
         ])
         test_transform = transforms.Compose([ \
-            transforms.Resize((224, 224)),
+            transforms.Resize(size=(224,224), interpolation=transforms.InterpolationMode.BILINEAR),
+            # transforms.CenterCrop(size=(224, 224)),
             transforms.ToTensor(),
             transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
         ])
@@ -144,19 +149,23 @@ def load_datasets(dataset_name, data_path, download=True, transform=None):
         download_and_split_SUN397(data_path)
         data_path = f"{data_path}/SUN397_split"
         
-    if dataset_name in ["SUN397", "lego", "lsun"]:
+    if dataset_name in ["SUN397", "lego", "lsun", "imagenet", "typographic"]:
+        transform = train_transform
+        if dataset_name=="typographic":
+            data_path = f"{data_path}/typographic_attack/train"
+            transform = test_transform
         # data manual split
-        dataset = data_class(data_path, transform=train_transform)
+        dataset = data_class(data_path, transform=transform)
         num_data = len(dataset)
-        training_ratio = 0.8
+        training_ratio = 0.9
         num_train_data = int(num_data*training_ratio)
         num_valid_data = num_data - num_train_data
         train_dataset, valid_dataset = torch.utils.data.random_split(dataset, [num_train_data, num_valid_data])
         valid_dataset.transform = test_transform
         classes = dataset.classes
-    elif dataset_name in ["celeba"]:
-        train_dataset, valid_dataset, _ = prepare_confounder_data(dataset_name, data_path)
-        classes = ["landbird", "waterbird"]
+    elif dataset_name in ["waterbird", "celeba", "fmow", "metashift"]:
+        train_dataset, valid_dataset, _ = prepare_confounder_data(dataset_name, data_path, aug=g_aug)
+        classes = confound_data2cls[dataset_name]
     elif dataset_name=="food101":
         train_dataset = data_class(data_path, split=split_train_str, download=download, transform=train_transform)
         if train_dataset.export_valid_meta_data():
@@ -180,9 +189,16 @@ def load_test_data(dataset_name, data_path, download=True, transform=None, split
     if split=="valid" and dataset_name in ["flowers102", "celeba"]:
         split = "val"
         
-    if transform is None:
+    if transform is None and dataset_name not in ["flowers102", "food101"]:
         transform = transforms.Compose([ \
-            transforms.Resize((224, 224)),
+            transforms.Resize(size=256, interpolation=transforms.InterpolationMode.BILINEAR),
+            transforms.CenterCrop(size=(224, 224)),
+            transforms.ToTensor(),
+            transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+        ])
+    else:
+        transform = transforms.Compose([ \
+            transforms.Resize(size=(224,224), interpolation=transforms.InterpolationMode.BILINEAR),
             transforms.ToTensor(),
             transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
         ])
@@ -191,11 +207,9 @@ def load_test_data(dataset_name, data_path, download=True, transform=None, split
     data_class = data_dict[dataset_name]
     if dataset_name in ["imagenet", "lego"]:
         test_dataset = ImageFolder(data_path, transform=transform)
-    elif dataset_name in ["celeba"]:
-        _, valid_dataset, test_dataset = prepare_confounder_data(dataset_name, data_path)
-        if split=="valid":
-            test_dataset = valid_dataset
-        classes = ["landbird", "waterbird"]
+    elif dataset_name=="waterbird":
+        test_dataset = prepare_confounder_data(dataset_name, data_path, splits=[split])[0]
+        classes = confound_data2cls[dataset_name]
     elif dataset_name=="SUN397":
         data_path = f"{data_path}/SUN397_split/test"
         test_dataset = data_class(data_path, download=False, transform=transform)
@@ -209,8 +223,6 @@ def load_test_data(dataset_name, data_path, download=True, transform=None, split
         classes = test_dataset.classes
         
     return test_dataset, classes
-
-
 
 def eval_loop(loader, model, device, out_mistakes=False):
     model.eval()
@@ -294,7 +306,7 @@ def train_model(train_loader, valid_loader, model, optimizer, scheduler, num_epo
         model.eval()
         print('Evaluating on validation set...')
         val_acc, _ = eval_loop(valid_loader, model, device)
-        if val_acc > 0.7 and val_acc > best_val_acc:
+        if val_acc > 0.5 and val_acc > best_val_acc:
             best_val_acc = val_acc
 
             # Save the model and configurations
@@ -306,26 +318,29 @@ def test_model(test_loader, model, device):
     print('Evaluating on test set...')
     test_acc, class_accuracy = eval_loop(test_loader, model, device)
     print("Test accuracy", test_acc)
-    return class_accuracy
+    return {"Avg. Acc.": test_acc, "Class Acc.": class_accuracy}
             
 
 def change_decision_layer(model, num_classes, requires_grad=True, is_vit=False):
-    decision = model.head if is_vit else model.fc
-    decision = nn.Linear(decision.in_features, num_classes)
-    for p in decision.parameters():
-        p.requires_grad = requires_grad
+    if is_vit:
+        model.head = nn.Linear(model.head.in_features, num_classes)
+        for p in model.head.parameters():
+            p.requires_grad = requires_grad
+    else:
+        model.fc = nn.Linear(model.fc.in_features, num_classes)
+        for p in model.fc.parameters():
+            p.requires_grad = requires_grad
         
     return model
 
-
 if __name__=="__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--batch_size", type=int, default=32)
+    parser.add_argument("--batch_size", type=int, default=128)
     parser.add_argument("--num_epochs", type=int, default=20)
-    parser.add_argument("--lr", type=float, default=5e-3) # 2e-3
+    parser.add_argument("--lr", type=float, default=2e-3)
     parser.add_argument("--eta_min_lr", type=float, default=2e-4)
     parser.add_argument("--weight_decay", type=float, default=0.0)
-    
+    parser.add_argument("--not_pretrained", action="store_true")
     parser.add_argument("--dataset", type=str, required=True)
     parser.add_argument("--model", type=str, default="resnet50")
     parser.add_argument("--optim", type=str, default="adam")
@@ -347,18 +362,15 @@ if __name__=="__main__":
     set_seed(args.seed)
     
     # load model
-    model = timm.create_model(args.model, pretrained=True)
+    model = timm.create_model(args.model, pretrained=(not args.not_pretrained))
     
     if args.test_only:
         test_dataset, classes = load_test_data(args.dataset, args.data_dir, args.download_data)
         test_loader = torch.utils.data.DataLoader(test_dataset, batch_size=args.batch_size, shuffle=False, num_workers=4)
-        # # Change the classifier layer
-        # change_decision_layer(model, len(classes), requires_grad=True)
         
         if args.ckpt_path is not None:
             model = torch.load(args.ckpt_path, map_location=torch.device(args.device))
         else:
-            # raise ValueError("Please specify the checkpoint path")
             print("Load pretrained model")
         
         # set model
@@ -380,8 +392,8 @@ if __name__=="__main__":
         
         # load dataset
         train_dataset, valid_dataset, classes = load_datasets(args.dataset, args.data_dir, args.download_data)
-        if args.dataset in ["celeba"]:
-            train_loader = train_dataset.get_loader(train=True, reweight_groups=True, \
+        if args.dataset=="waterbird":
+            train_loader = train_dataset.get_loader(train=True, reweight_groups=False, \
                             batch_size=args.batch_size, num_workers=4, pin_memory=True)
             valid_loader = valid_dataset.get_loader(train=False, reweight_groups=None, \
                             batch_size=args.batch_size, num_workers=4, pin_memory=True)
@@ -393,8 +405,8 @@ if __name__=="__main__":
         print("Classes:\n", classes)
             
         # Change the classifier layer
-        change_decision_layer(model, len(classes), requires_grad=True, is_vit=args.model.startswith("vit"))
-            
+        change_decision_layer(model, len(classes), requires_grad=True, is_vit="vit" in args.model)
+        
         # train model
         model = model.to(args.device)
         

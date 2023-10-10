@@ -51,46 +51,43 @@ class FocalLoss(nn.Module):
         
         
 @torch.no_grad()
-def eval_loop_micro_macro(loader, model, device, out_mistakes=False):
+def eval_loop_group(loader, model, device):
     model.eval()
-    accuracymeter = AverageMeter()
-    lossmeter = AverageMeter()
     tqdm_loader = tqdm(enumerate(loader), desc="Evaluating")
     
     # Initialize dictionary for storing class-wise accuracy and count
+    group_correct = [0 for _ in range(4)]
+    group_total = [0 for _ in range(4)]
+
+    avg_correct = 0
+    avg_total = 0
+
     class_correct = {}
     class_total = {}
-    mistakes = []
 
     for idx, batch in tqdm_loader:
         inputs = batch[0].to(device)
         labels = batch[1].to(device)
+        g_labels = batch[2].to(device)
         outputs = model(inputs)
         preds = torch.argmax(outputs, 1)
         
         # Update overall accuracy and loss meters
-        accuracymeter.update((preds == labels).float().mean().cpu().numpy(), inputs.size(0))
-        lossmeter.update((preds == labels).float().mean().cpu().numpy(), inputs.size(0))
-        
-        # Update class-wise accuracy and count
-        for i in range(len(labels)):
-            label = labels[i].item()
+        corrected = (preds==labels).float()
+        avg_correct += corrected.sum().item()
+        avg_total += len(labels)
+        for g in range(4):
+            group_correct[g] += (corrected[g_labels==g]).sum().item()
+            group_total[g] += (g_labels==g).sum().item()
+
+        for label in list(set(batch[1].tolist())):
+            label_mask = labels==label
             if label in class_correct:
-                class_correct[label] += (preds[i] == label).float().sum().item()
-                class_total[label] += 1
+                class_correct[label] += corrected[label_mask].sum().item()
+                class_total[label] += label_mask.float().sum().item()
             else:
-                class_correct[label] = (preds[i] == label).float().sum().item()
-                class_total[label] = 1
-                
-        if out_mistakes:
-            end_idx = (idx+1)*loader.batch_size
-            if end_idx > len(loader.dataset):
-                end_idx = len(loader.dataset)
-            indices = torch.arange(idx*loader.batch_size, end_idx)
-            incorrect = (preds!=labels).cpu()
-            mistakes.extend(indices[incorrect].tolist())
-        
-        tqdm_loader.set_postfix(Acc=accuracymeter.avg, Loss=lossmeter.avg)
+                class_correct[label] = corrected[label_mask].sum().item()
+                class_total[label] = label_mask.float().sum().item()
     
     # Calculate class-wise accuracy
     class_accuracy = {}
@@ -100,16 +97,12 @@ def eval_loop_micro_macro(loader, model, device, out_mistakes=False):
     class_accuracy = {k: v for k, v in sorted(class_accuracy.items(), key=lambda item: item[0])}
 
     # Calculate micro and macro averages
-    tp = sum(class_correct.values())
-    total = sum(class_total.values())
-    micro_avg = tp / total
-    macro_avg = sum(class_accuracy.values()) / len(class_accuracy)
+    for c, acc in class_accuracy.items():
+        print(f"Class {c} accuracy: {acc*100:.2f}")
 
-    if out_mistakes:
-        return mistakes, micro_avg, macro_avg
-    else:
-        # Return overall accuracy, class-wise accuracy, and micro/macro averages
-        return accuracymeter.avg, class_accuracy, micro_avg, macro_avg
+    print(f"Overall: {avg_correct/avg_total:.4f}")
+    for g in range(4):
+        print(f"Group {g}: {group_correct[g]/group_total[g]:.4f}")
     
 
 class AverageMeter(object):
@@ -134,7 +127,7 @@ def config():
     parser = argparse.ArgumentParser()
     parser.add_argument("--batch_size", type=int, default=32)
     parser.add_argument("--num_epochs", type=int, default=20)
-    parser.add_argument("--lr", type=float, default=1e-3) # 2e-3
+    parser.add_argument("--lr", type=float, default=1e-4) # 2e-3
     parser.add_argument("--ckpt_path", type=str, required=True)
     
     parser.add_argument("--dataset", type=str, required=True)
@@ -142,16 +135,15 @@ def config():
     parser.add_argument("--optim", type=str, default="adam")
     parser.add_argument("--data_dir", type=str, default="data")
     parser.add_argument("--download_data", action="store_true")
-    parser.add_argument("--seed", type=int, default=77)
+    parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--device", type=int, default=0)
     parser.add_argument("--ckpt_dir", type=str, default="ckpt")
     parser.add_argument("--save_dir", type=str, default="results/class_acc")
     
-    parser.add_argument("--neurons", nargs="+", type=int, required=True, help="neurons to be modified")
-    parser.add_argument("--modifying_class", type=int, required=True)
+    parser.add_argument("--neurons", nargs="+", type=int, required=True)
+    # parser.add_argument("--neurons_c1", nargs="+", type=int, required=True)
     parser.add_argument("--gamma", type=float, default=1.0)
-    parser.add_argument("--weight_decay", type=float, default=0.0)
-    parser.add_argument("--lambda3", type=float, default=0.1)
+    parser.add_argument("--lambda3", type=float, default=0.01)
     parser.add_argument("--method", type=str, default="ours", help="ablation studies for focal loss, (cw, focal, ours)")
    
     return parser.parse_args()
@@ -170,18 +162,19 @@ def get_warmup_lr_scheduler(optimizer, init_lr, lr_rampdown_length=0.25, lr_ramp
 
 
 def train_model(train_loader, val_loader, model, optimizer, ckpt_dir, lambda3, \
-                gamma, num_epochs, device, scheduler=None, mod_class=None, \
+                gamma, num_epochs, device, scheduler=None, \
                 neuron_mask=None, method="ours"):
     
     num_classes = model.fc.weight.data.shape[0]
     print("num_classes: ", num_classes)
+    
     if method=="cw":
-        class_weights = torch.ones(num_classes) * 0.9
-        class_weights[mod_class] = 1.0
+        class_weights = torch.ones(num_classes) * 0.95
+        class_weights[1] = 1.0
         criterion = nn.CrossEntropyLoss(weight=class_weights.to(device))
     elif method=="focal":
-        class_weights = [0.9 for _ in range(num_classes)]
-        class_weights[mod_class] = 1.0
+        class_weights = [0.95 for _ in range(num_classes)]
+        class_weights[1] = 1.0
         criterion = FocalLoss(alpha=class_weights, gamma=2.0)
     else:
         criterion = nn.CrossEntropyLoss()
@@ -206,25 +199,19 @@ def train_model(train_loader, val_loader, model, optimizer, ckpt_dir, lambda3, \
             features = model.forward_features(inputs)
             features = model.global_pool(features)
             outputs = model.fc(features)
-                        
-            if neuron_mask is not None:
-                features_masked = features*neuron_mask.detach()
-                
+            features_masked = features*neuron_mask.detach()
+            # features_masked1 = features*neuron_masks[1].detach()
+            
             ce_loss = criterion(outputs, labels)
             
-            if method=="ours":
-                # contrib = model.fc.weight[mod_class].unsqueeze(0)*features + model.fc.bias[mod_class]
-                # contrib = contrib.clamp(min=0.0)
-                # contrib = contrib * neuron_mask
-                # l2_loss = torch.norm(contrib, dim=1, p=2).mean()
+            if method=="ours":    
                 prob = torch.softmax(outputs, dim=1)
                 changed_prob = torch.softmax(model.fc(features_masked), dim=1)
-                retaining_ratio = (prob / (changed_prob+1e-9))
-                
-                l2_loss = torch.norm(retaining_ratio[:,mod_class]-gamma, dim=0, p=2).mean()
+                retaining_ratio = (prob / (changed_prob+1e-9)).mean()
+                l2_loss = torch.norm(retaining_ratio-gamma, dim=0, p=2).mean()
                 
                 loss = ce_loss + l2_loss * lambda3
-                tqdm_loader.set_postfix(ce=ce_loss.item(), l2=l2_loss.item())
+                tqdm_loader.set_postfix(ce=ce_loss.item(), l1=l2_loss.item())
             else:
                 loss = ce_loss
                 tqdm_loader.set_postfix(ce=ce_loss.item())
@@ -240,16 +227,17 @@ def train_model(train_loader, val_loader, model, optimizer, ckpt_dir, lambda3, \
         val_acc, class_acc = eval_loop(val_loader, model, device)
         min_class_acc = min(class_acc.values())
         print("Val acc", val_acc*100)
-        print(f"Val class {mod_class} acc", class_acc[mod_class]*100)
-        print(f"Min class acc", min_class_acc*100)
+        print(f"Val class acc", class_acc[0]*100, class_acc[1]*100)
         
         if epoch==0:
             continue
         
-        if val_acc >= best_val_acc:
-            best_val_acc = val_acc
-            print("Save checkpoint:", val_acc, class_acc[mod_class], min_class_acc)
-            ckpt_path = os.path.join(ckpt_dir, "best_%.2f_c%.2f.pt" % (val_acc*100, class_acc[mod_class]*100))
+        # if val_acc >= best_val_acc:
+        #     best_val_acc = val_acc
+        if best_cls_acc <= min_class_acc:
+            best_cls_acc = min_class_acc
+            print("Save checkpoint:", val_acc, min_class_acc)
+            ckpt_path = os.path.join(ckpt_dir, "best_%.2f.pt" % (val_acc*100))
             torch.save(model, ckpt_path)
             patience_counter = 0
         else:
@@ -261,7 +249,7 @@ def train_model(train_loader, val_loader, model, optimizer, ckpt_dir, lambda3, \
     return ckpt_path
 
 def prepare_editing(model, args, viz_paths=None):
-    train_dataset, valid_dataset, _ = load_datasets(args.dataset, args.data_dir, args.download_data)
+    train_dataset, valid_dataset, _ = load_datasets(args.dataset, args.data_dir, args.download_data, g_aug=True)
     if viz_paths is not None:
         train_dataset._image_files.extend(viz_paths)
         train_dataset._labels.extend([args.class_idx for _ in range(len(viz_paths))])
@@ -281,8 +269,8 @@ def prepare_editing(model, args, viz_paths=None):
     neuron_mask.index_fill_(0, index, 0)
     neuron_mask = neuron_mask.unsqueeze(0).to(args.device)
     
-    optimizer = optim.Adam(model.fc.parameters(), lr=args.lr, weight_decay=args.weight_decay)
-    scheduler = get_warmup_lr_scheduler(optimizer, args.lr)
+    optimizer = optim.Adam(model.fc.parameters(), lr=args.lr, weight_decay=1e-4)
+    scheduler = None#get_warmup_lr_scheduler(optimizer, args.lr)
     
     return train_loader, valid_loader, optimizer, scheduler, neuron_mask
 
@@ -293,8 +281,6 @@ def main(args):
 
     model = torch.load(args.ckpt_path, map_location=f"cuda:{args.device}")
     model.eval()
-    config = resolve_data_config({}, model=model)
-    transform = create_transform(**config)
 
     ckpt_dir = os.path.join(args.ckpt_dir, args.dataset+"_"+args.model+"_edit_"+args.method)
     os.makedirs(ckpt_dir, exist_ok=True)
@@ -305,23 +291,18 @@ def main(args):
     # Train the model
     new_ckpt_path = train_model(train_loader, valid_loader, model, optimizer, ckpt_dir, \
                                 args.lambda3, args.gamma, args.num_epochs,\
-                                args.device, scheduler=scheduler, mod_class=args.modifying_class, \
+                                args.device, scheduler=scheduler, \
                                 neuron_mask=neuron_mask, method=args.method)
 
-    test_dataset, _ = load_test_data(args.dataset, args.data_dir, args.download_data, split="test")
-    test_loader = torch.utils.data.DataLoader(test_dataset, batch_size=128, shuffle=False, num_workers=4)
+    test_dataset, _ = load_test_data(args.dataset, args.data_dir, args.download_data)
+    test_loader = torch.utils.data.DataLoader(test_dataset, batch_size=64, shuffle=False, num_workers=4)
     
     print("Load best checkpoint -", new_ckpt_path)
     model = torch.load(new_ckpt_path, map_location=f"cuda:{args.device}")
     model.eval()
     print('Evaluating on test set...')
-    acc_avg, class_acc, micro_avg, macro_avg= eval_loop_micro_macro(test_loader, model, args.device)
-    print("Test accuracy", acc_avg*100, "Worst class acc", min(class_acc.values()))
+    eval_loop_group(test_loader, model, args.device)
     
-    report = {"acc_avg": acc_avg, "micro_avg": micro_avg, "macro_avg": macro_avg, "class accuracy": class_acc}
-
-    with open(f"{args.save_dir}/{args.dataset}_{args.model}_edited_{args.method}.json", "w") as f:
-        json.dump(report, f, indent=2)
     
 if __name__ == "__main__":
     args = config()

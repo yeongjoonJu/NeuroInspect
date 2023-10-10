@@ -8,7 +8,7 @@ from utils.ops import Jitter, ColorJitter, get_transforms, lucid_colorspace_to_r
 
 
 class ImageParams(torch.nn.Module):
-    def __init__(self, init_image=None, image_size=128, std=0.01, rotate_degrees=15, scale_max=1.2, scale_min=0.5, \
+    def __init__(self, init_image=None, image_size=128, std=0.001, rotate_degrees=15, scale_max=1.2, scale_min=0.5, \
                 translate_x = 0.15, translate_y = 0.15, batch_size=1, max_iter=512, device="cuda", color_aug=False):
         super().__init__()
         self.image_size = image_size

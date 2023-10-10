@@ -13,7 +13,7 @@ from utils.model_utils import load_vision_model
 from utils.objectives import ClassConditionalObjective
 from utils.config import Domain2Dict
 from utils.feature_manipulation import counterfactual_explanation
-from train_test_classifier import load_test_data, eval_loop, set_seed
+from train_test_classifier import load_test_data, set_seed
 from scripts.inspect_class_mistakes import inspect_mistakes_in_class, vote_topk, aggregate_vote
 from scripts.edit_decision import prepare_editing, train_model
 
@@ -68,7 +68,7 @@ def inference_one_sample(model, image_path, device):
     return pred
 
 
-def select_spurious_attribute(model, illusion, class_idx, images, acts, masks, class_features, batch_size, reduction="mean"):
+def select_spurious_attribute(model, illusion, class_idx, images, acts, masks, class_features, batch_size, reduction="max", k=20, n=2):
     with torch.no_grad():
         class_features = torch.cat(class_features, dim=0)
         
@@ -95,22 +95,19 @@ def select_spurious_attribute(model, illusion, class_idx, images, acts, masks, c
                 features = features.mean(dim=1)
                 features_rev = features_rev.mean(dim=1)
         
-        spurious = torch.zeros(features.size(0), dtype=torch.bool)
+        core_sensitivity = []
         for n in range(features.size(0)):
             corr = F.cosine_similarity(features[n:n+1], class_features.detach())
             corr_rev = F.cosine_similarity(features_rev[n:n+1], class_features.detach())
-            sensitivity = corr - corr_rev
+            sensitivity = corr_rev / corr
+            top_cls = torch.topk(corr, k=k, dim=0, largest=True)[1]
             sen_cls = sensitivity[class_idx].item()
-            sensitivity[class_idx] = -99.0
-            spurious[n] = sensitivity.min(dim=0)[0].item() <= sen_cls
+            
+            sen_remain = (sensitivity[top_cls].sum() / len(top_cls))
+            core_sensitivity.append((sen_cls / sen_remain).item())
         
-        acts = acts.cpu()
-        selected = torch.logical_or(spurious, acts==0.0)
-        if selected.sum()==0:
-            print(sensitivity)
-            raise NotImplementedError("No spurious attribute is found.")
-                        
-        return selected
+        return core_sensitivity
+
 
 if __name__=="__main__":
     args = parsing_args()
@@ -130,7 +127,7 @@ if __name__=="__main__":
     device = torch.device(args.device)
     
     # Test the model
-    mistake_samples, imp, class_features = inspect_mistakes_in_class(args.class_idx, len(classes), test_loader, img_filelist, model, device)
+    mistake_samples, imp, class_features = inspect_mistakes_in_class(len(classes), test_loader, img_filelist, model, device, class_idx=args.class_idx, decision=modules["decision"])
     num_mistakes = len(mistake_samples)
     print(f"> {args.model} has {num_mistakes} mistakes for the {args.dataset} dataset.")
     
@@ -161,10 +158,10 @@ if __name__=="__main__":
         if n_id in neg_ids:
             skip+=1
             continue
-        if r >= 15:
+        if r >= 30:
             break
         pos_n_id.append(n_id)
-        print("Top-%d: %4d  %2.3f   %.4f" % (r+1-skip, n_id, v, imp[n_id]))
+        print("Top-%d: %4d  %2.3f   %.4f" % (r+1-skip, n_id, v, 1.0 if imp is None else imp[n_id]))
     print("--------------------------------")
             
     print("\n- Excessive Properties:")
@@ -176,18 +173,17 @@ if __name__=="__main__":
         if n_id in pos_ids:
             skip+=1
             continue
-        if r >= 15:
+        if r >= 30:
             break
         neg_n_id.append(n_id)
-        print("Top-%d: %4d  %2.3f   %.4f" % (r+1-skip, n_id, v, imp[n_id]))
+        print("Top-%d: %4d  %2.3f   %.4f" % (r+1-skip, n_id, v, 1.0 if imp is None else imp[n_id]))
     print("--------------------------------\n")
         
     print("> Debugging mode.")
     print("> Please enter exit to quit.\n")
     cmd = ""
     while True:
-        # cmd = input(">> Input indices of neuron to debug: ")
-        cmd = "auto"
+        cmd = input(">> Input indices of neuron to debug: ")
         try:
             if cmd == "exit":
                 print("> Bye.")
@@ -232,82 +228,47 @@ if __name__=="__main__":
         
         # Automatic Neuron selection
         # cmd = input(">> Do you want to select neurons to edit automatically? (y/n): ")
-        cmd = "y"
-        if cmd.strip()=="y":
-            print(f"\n> Selecting spurious attributes...")
-            n_mask = select_spurious_attribute(model, illusion, cond_class, viz, acts, masks, class_features, args.batch_size)
-            args.neurons = torch.LongTensor(neuron_ids)[n_mask.cpu()].tolist()
-        else:
-            cmd = input(">> Input indices of neuron to debug: ")
-            try:
-                if cmd == "exit":
-                    print("> Bye.")
+        cmd = input(">> Input indices of neuron to debug: ")
+        try:
+            if cmd == "exit":
+                print("> Bye.")
+                break
+            neuron_ids = cmd.split(" ")
+            neuron_ids = [int(n_id) for n_id in neuron_ids]
+            
+            check = True
+            for n_id in neuron_ids:
+                if n_id >= dimension:
+                    print("> Please input an integer less than %d or exit." % dimension)
+                    check=False
                     break
-                neuron_ids = cmd.split(" ")
-                neuron_ids = [int(n_id) for n_id in neuron_ids]
-                
-                check = True
-                for n_id in neuron_ids:
-                    if n_id >= dimension:
-                        print("> Please input an integer less than %d or exit." % dimension)
-                        check=False
-                        break
-                if not check:
-                    continue
-            except ValueError as e:
-                print("> Please input an integer or exit.")
+            if not check:
                 continue
-        
-        args.neg_neurons = neg_n_id[:3]
+        except ValueError as e:
+            print("> Please input an integer or exit.")
+            continue
         
         print(f"\n> Preparing training... | Selected neurons: {args.neurons}\n")
         if args.ckpt_path is None:
             args.ckpt_path = f"./ckpt/{args.dataset}"
             os.makedirs(args.ckpt_path, exist_ok=True)
 
-        args.lr = 1e-4
+        args.lr = 1e-3
         args.download_data = True
         ckpt_dir = os.path.dirname(args.ckpt_path)
-        lambda3 = 0.2
+        lambda3 = 1e-2
         num_epochs = 20
         
         imp_neurons = [imp[n_id] for n_id in args.neurons]
         gamma = (min(imp_neurons)-1)/3 + 1
-        imp_neurons = [imp[n_id] for n_id in args.neg_neurons]
-        gamma_neg = 1.0#(max(imp_neurons)-1)/3 + 1
-        
-        print(gamma, gamma_neg)
                     
         # Edit decision
         ill_batch_size = args.batch_size
         args.batch_size = args.test_batch_size
         
-        # cmd = input(">> Do you want to add excessive features? (y/n): ")
-        cmd = "n"
-        viz_paths = None
-        if cmd.strip()=="y":
-            viz_paths = illusion.visualize_neurons(
-                experiment_name=exp_name,
-                target_neurons=neg_n_id[:5],
-                layer=model.layer4,
-                iters=args.iters,
-                lr=9e-3,
-                batch_size=ill_batch_size,
-                weight_decay=2e-4,
-                class_idx=cond_class,
-                thresholding=True,
-                reduction=1.0, threshold=0.25,
-                quiet=True,
-                out_path=True
-            )
-            print(f"> {len(viz_paths)} samples are added in training data")
-            
-        train_loader, valid_loader, optimizer, scheduler, neuron_mask, neg_neuron_mask = prepare_editing(model, args, viz_paths=viz_paths)
+        train_loader, valid_loader, optimizer, scheduler, neuron_mask = prepare_editing(model, args)
         new_ckpt_path = train_model(train_loader, valid_loader, model, optimizer, ckpt_dir, lambda3, gamma, num_epochs,\
-                                scheduler=scheduler, device=args.device, mod_class=args.class_idx, neuron_mask=neuron_mask, \
-                                gamma_neg=gamma_neg, neg_neuron_mask=neg_neuron_mask)
+                                scheduler=scheduler, device=args.device, mod_class=args.class_idx, neuron_mask=neuron_mask, )
         print("Best checkpoint -", new_ckpt_path)
         
         args.batch_size = ill_batch_size
-        
-        break

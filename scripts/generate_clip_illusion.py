@@ -9,7 +9,6 @@ from clip_illusion import Illusion
 from utils.objectives import ClassConditionalObjective
 
 import torch
-import numpy as np
 
 from utils.config import Domain2Dict
 
@@ -34,7 +33,7 @@ if __name__=="__main__":
     parser.add_argument("--target_class", type=int, default=None)
     parser.add_argument("--class_gamma", type=float, default=0.8)
     parser.add_argument("--target_neurons", nargs="+", type=int, default=None)
-    parser.add_argument("--domain_eps", type=float, default=0.01)
+    parser.add_argument("--domain_eps", type=float, default=0.05)
     args = parser.parse_args()
     
     assert args.target_neurons is not None
@@ -58,10 +57,8 @@ if __name__=="__main__":
 
     # load model
     transform, model, pool, decision, config = load_vision_model(model_name, device=device, ckpt_path=args.ckpt_path)
-    illusion = Illusion(model, decision, \
-                        ClassConditionalObjective(image_size=224, is_vit=False, class_dict=class_dict, \
-                        class_gamma=args.class_gamma, domain_eps=args.domain_eps,), \
-                        device=device, img_mean=config["mean"], img_std=config["std"])
+    obj = ClassConditionalObjective(image_size=224, is_vit=("vit" in args.model), class_gamma=args.class_gamma, domain_eps=args.domain_eps)
+    illusion = Illusion(model, decision, obj, class_dict=class_dict, device=device, img_mean=config["mean"], img_std=config["std"])
     """
     Acquiring data-agnostic neuron representations
     """
@@ -73,11 +70,11 @@ if __name__=="__main__":
         experiment_name=exp_name,
         target_neurons=args.target_neurons,
         layer= eval(f"model.{args.probing_layer}"), # model.layer4,
-        iters=args.iters, # 80,
-        lr=args.lr, #lr=5e-3,
+        iters=args.iters,
+        lr=args.lr,
         overwrite_experiment=True,
         batch_size=args.batch_size,
-        weight_decay=args.weight_decay, # 3e-2
+        weight_decay=args.weight_decay,
         quiet=args.quiet,
         class_idx=args.target_class
     )

@@ -83,12 +83,13 @@ class ChannelObjective(torch.nn.Module):
         return loss.mean()
     
     def activation(self, layer_out):
-        if len(layer_out.shape) > 2:
+        if len(layer_out.shape) >= 4:
             channel_out = layer_out.view(layer_out.shape[0], layer_out.shape[1], -1)
             channel_out = channel_out.mean(dim=-1)
+        elif len(layer_out.shape)==3:
+            channel_out = layer_out[:,0]
         else:
             channel_out = layer_out
-        
         
         if type(self.channel_number) is int:
             channel_out = channel_out[:,self.channel_number]
@@ -131,10 +132,11 @@ class ChannelObjective(torch.nn.Module):
 
 class ClassConditionalObjective(ChannelObjective):
     def __init__(self, channel_number=0, class_idx=0, image_size=224, is_vit=False,\
-                class_gamma=0.5, domain_eps=0.01,): 
+                class_gamma=0.5, domain_eps=0.01, wo_clip=False): 
         super().__init__(channel_number, class_idx, image_size, is_vit)
         self.class_gamma = class_gamma
         self.domain_eps = domain_eps
+        self.wo_clip = wo_clip
         
     def clip_loss(self, img_feats, text_feats):
         loss_clip = img_feats @ text_feats.detach().t()
@@ -151,14 +153,15 @@ class ClassConditionalObjective(ChannelObjective):
             
         class_adj = self.class_gamma#loss.clamp(min=0.01, max=self.class_gamma)
             
-        return -1*(loss + logits*class_adj)
+        return loss + logits*class_adj
     
     def __call__(self, layer_out, decision_out, img_feats, text_feats):
-        loss = self.forward(layer_out, decision_out)
+        loss_act = self.forward(layer_out, decision_out)
         loss_clip = self.clip_loss(img_feats, text_feats)
-        loss_ce = F.cross_entropy(decision_out, self.class_idx, reduction="none")
         
-        loss = (loss_clip+self.domain_eps)*loss
+        if self.wo_clip:
+            return (-1*loss_act.mean(),)
         
-        return (loss + loss_ce).mean()
-        # return loss.mean()
+        loss = -1*(loss_clip + self.domain_eps)*loss_act
+        
+        return loss.mean(), loss_clip.mean(), loss_act.mean()
