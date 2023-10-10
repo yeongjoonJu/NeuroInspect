@@ -2,7 +2,7 @@
  
  ## Abstract
 
- Interpreting the decision-making process of deep neural networks without additional data or retraining is challenging due to their black-box nature. Neuron interpretation approaches offer a solution, but abstruse visualizations or confirmation bias hinder the adoption of interpreted neurons as supporting evidence for decisions. This paper presents a neuron-based debugging framework based on the perspective that neurons represent sets of human-understandable concepts. To explain the underlying reasons for decisions, we introduce CLIP-Illusion, a novel feature visualization method that generates images representing features conditioned on classes to examine the connection between neurons and the decision layer. We mitigate convoluted explanations by leveraging class-conditional visualization with class information, isolating mixed properties. Our simple debugging framework reveals and alleviates the causes of the mistakes in image classification networks through counterfactual explanations by interpreting concepts of features through human-understandable visualizations. We validate the effectiveness of our framework by addressing false correlations learned from the dataset and improving inferences for hard classes in real-world settings.
+Despite deep learning (DL) has achieved remarkable progress in various domains, the DL models are still prone to making mistakes. This issue necessitates effective debugging tools for DL practitioners to interpret the decision-making process within the networks. However, existing debugging methods often demand extra data or adjustments to the decision process, limiting their applicability. To tackle this problem, we present NeuroInspect, an interpretable neuron-based debugging framework with three key stages: counterfactual explanations, feature visualizations, and false correlation mitigation. Our debugging framework first pinpoints neurons responsible for mistakes in the network and then visualizes features embedded in the neurons to be human-interpretable. To provide these explanations, we introduce CLIP-Illusion, a novel feature visualization method that generates images representing features conditioned on classes to examine the connection between neurons and the decision layer. We alleviate convoluted explanations of the conventional visualization approach by employing class information, thereby isolating mixed properties. This process offers more human-interpretable explanations for model errors without altering the trained network or requiring additional data. Furthermore, our framework mitigates false correlations learned from a dataset under a stochastic perspective, modifying decisions for the neurons considered as the main causes. We validate the effectiveness of our framework by addressing false correlations and improving inferences for classes with the worst performance in real-world settings. Moreover, we demonstrate that NeuroInspect helps debug the mistakes of DL models through evaluation for human understanding.
 
  **Overall process of our debugging framework**
 
@@ -78,6 +78,7 @@ python -m scripts.edit_decision --model resnet50 --dataset flowers102 --ckpt_pat
 | Original   | 84.66%      | 33.33%     |
 | After Edit | 84.26%      | 58.33%     |
 
+___
 
 ### Food101 Dataset (ResNet-50)
 
@@ -120,6 +121,7 @@ python -m scripts.edit_decision --model resnet50 --dataset food101 --ckpt_path c
 | Original   | 82.65%    | 43.2%                |
 | After Edit | 82.20%    | 58.0%                |
 
+___
 
 ### Waterbird Dataset (ResNet-50)
 
@@ -192,11 +194,3 @@ Editing the model after identifying neurons corresponding to spurious features
 cd exp_spurious
 bash run_editing.sh
 ~~~
-
-### Salient ImageNet
-
-~~~bash
-curl -L https://umd.app.box.com/shared/static/eyji8leh2lemhbxovgny9ywc9is53ibr -o salient_imagenet_dataset.zip
-unzip salient_imagenet_dataset
-~~~
-
