@@ -166,6 +166,9 @@ python -m scripts.edit_decision_waterbird --model resnet50 --dataset waterbird -
 | Original   | 91.73%    | 79.83% (class 1) | 66.04% |
 | After Edit | 90.65%    | 83.88% (class 1) | 72.43% |
 
+___
+
+### MetaShift Experiments
 
 **Set experiments for spurious correlations**
 
