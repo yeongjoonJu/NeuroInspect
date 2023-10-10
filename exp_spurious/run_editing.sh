@@ -1,0 +1,10 @@
+python edit_decision.py --dataset="bear-bird-cat-dog-elephant:dog(chair)" --device 0 --modifying_class 3 --neurons 244 36 47 430 194 --save_name edited_cc
+python evaluate_cce.py --device 4 --concept-bank="ckpts/resnet18_bank.pkl" --dataset "bear-bird-cat-dog-elephant:dog(chair)" --edited
+python edit_decision.py --dataset="bear-bird-cat-dog-elephant:dog(water)" --device 0 --modifying_class 3 --neurons 510 481 56 370 133 --save_name edited_cc
+python evaluate_cce.py --device 4 --concept-bank="ckpts/resnet18_bank.pkl" --dataset "bear-bird-cat-dog-elephant:dog(water)" --edited
+python edit_decision.py --dataset="bear-bird-cat-dog-elephant:cat(book)" --device 0 --modifying_class 2 --neurons 381 364 47 484 --save_name edited_con
+python evaluate_cce.py --device 4 --concept-bank="ckpts/resnet18_bank.pkl" --dataset "bear-bird-cat-dog-elephant:cat(book)" --edited
+python edit_decision.py --dataset="bear-bird-cat-dog-elephant:bird(sand)" --device 0 --modifying_class 1 --neurons 104 56 304 435 182 --save_name edited_con
+python evaluate_cce.py --device 4 --concept-bank="ckpts/resnet18_bank.pkl" --dataset "bear-bird-cat-dog-elephant:bird(sand)" --edited
+python edit_decision.py --dataset="bear-bird-cat-dog-elephant:cat(keyboard)" --device 0 --modifying_class 2 --neurons 222 121 201 373  --save_name edited_con
+python evaluate_cce.py --device 4 --concept-bank="ckpts/resnet18_bank.pkl" --dataset "bear-bird-cat-dog-elephant:cat(keyboard)" --edited

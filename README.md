@@ -140,24 +140,20 @@ python train_test_classifier.py --model resnet50 --dataset waterbird --batch_siz
 python train_test_classifier.py --model resnet50 --dataset waterbird --batch_size 64 --test_only --ckpt_path ckpt/waterbird_resnet50/best_model.pt --device [device_id]
 ~~~
 
-**Editing Options**
-+ $o$: 1.0
-+ $\lambda_3$: 0.01
-+ Target neurons: 6, 915, 1493, 1039, 341, 623
-
-Command:
+Debugging Command:
 
 ~~~bash
 # Debugging
 python -m scripts.debug_mistakes_per_class --model resnet50 --dataset waterbird --ckpt_path ckpt/waterbird_resnet50/best_model.pt --domain waterbird --class_idx 1 --class_gamma 0.5 --domain_eps 0.05 --device [device_id]
 ~~~
 
-**Editing Options**
-+ $o$: 1.02
-+ $\lambda_3$: 0.01
-+ Target neurons: 1039, 1172, 1549
 
-Command:
+**Editing Options**
++ $o$: 1.0
++ $\lambda_3$: 0.01
++ Target neurons: 6, 915, 1493, 1039, 341, 623
+
+Editing Command:
 
 ~~~bash
 # Debugging
