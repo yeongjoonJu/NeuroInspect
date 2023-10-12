@@ -2,7 +2,7 @@
 
 > [Yeong-Joon Ju](https://github.com/yeongjoonJu), Ji-Hoon Park, and Seong-Whan Lee
 
-[Paper](https://arxiv.org/abs/2310.07184)
+[[Paper]](https://arxiv.org/abs/2310.07184)
 
 ## Abstract
 
