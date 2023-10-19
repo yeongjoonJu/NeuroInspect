@@ -141,7 +141,6 @@ def config():
     parser.add_argument("--save_dir", type=str, default="results/class_acc")
     
     parser.add_argument("--neurons", nargs="+", type=int, required=True)
-    # parser.add_argument("--neurons_c1", nargs="+", type=int, required=True)
     parser.add_argument("--gamma", type=float, default=1.0)
     parser.add_argument("--lambda3", type=float, default=0.01)
     parser.add_argument("--method", type=str, default="ours", help="ablation studies for focal loss, (cw, focal, ours)")
@@ -200,7 +199,6 @@ def train_model(train_loader, val_loader, model, optimizer, ckpt_dir, lambda3, \
             features = model.global_pool(features)
             outputs = model.fc(features)
             features_masked = features*neuron_mask.detach()
-            # features_masked1 = features*neuron_masks[1].detach()
             
             ce_loss = criterion(outputs, labels)
             
@@ -248,11 +246,8 @@ def train_model(train_loader, val_loader, model, optimizer, ckpt_dir, lambda3, \
             
     return ckpt_path
 
-def prepare_editing(model, args, viz_paths=None):
+def prepare_editing(model, args):
     train_dataset, valid_dataset, _ = load_datasets(args.dataset, args.data_dir, args.download_data, g_aug=True)
-    if viz_paths is not None:
-        train_dataset._image_files.extend(viz_paths)
-        train_dataset._labels.extend([args.class_idx for _ in range(len(viz_paths))])
     train_loader = torch.utils.data.DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True, num_workers=4)
     valid_loader = torch.utils.data.DataLoader(valid_dataset, batch_size=args.batch_size, shuffle=False, num_workers=4)
     

@@ -1,22 +1,18 @@
 import os, time
-from typing import Callable, List
+from typing import List
 from tqdm import tqdm
 from glob import glob
 
 from utils.hook import Hook
 
-import numpy as np
-
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 import utils.dir_handler as dh
 from utils.params import ImageParams
 from utils.prompts import prepare_class_names
 from utils.config import revised_prompt_templates
 from utils.objectives import ClassConditionalObjective, ChannelObjective
 
-# import clip
 import open_clip
 
 
@@ -35,7 +31,6 @@ class Illusion(object):
         self.decision = decision
         self.objective_fn = objective_fn
     
-        # self.clip_model, self.clip_preprocess = clip.load("ViT-B/32", device=self.device, jit=False)
         self.clip_model, _, _ = open_clip.create_model_and_transforms("ViT-B-32", pretrained='laion2b_s34b_b79k')
         self.clip_model.to(self.device)
         self.clip_model.eval()
@@ -101,7 +96,6 @@ class Illusion(object):
             img_param = ImageParams(image_size=image_size, batch_size=batch_size, device=self.device, max_iter=iters, init_image=init_image, \
                 scale_min=scale_min, scale_max=scale_max, rotate_degrees=rotate_degrees, translate_x=translate_x, translate_y=translate_y, color_aug=color_aug)
         _, act = self.optimize_image(layer, img_param, objective_fn, iters, lr, class_indices=class_indices, weight_decay=weight_decay, quiet=True)
-        # max_act_idx = torch.argmax(act, dim=0)
         dream = img_param.to_chw_tensor().detach()
         
         return dream, act.detach()
@@ -111,18 +105,18 @@ class Illusion(object):
         if format:
             prompts = [temp.format(text) for temp in revised_prompt_templates]
         else:
-            prompts = [f"a close up of a person, {text}, associated press photo"]
+            prompts = [f"a photo of a {text}"]
+        
         target_tokenized = self.tokenizer(prompts).to(self.device)
         with torch.no_grad():
             target_text_feats = self.clip_model.encode_text(target_tokenized)
             target_text_feats = target_text_feats / target_text_feats.norm(dim=-1, keepdim=True)
             target_text_feats = target_text_feats.mean(dim=0)
-            # target_text_feats /= target_text_feats.norm()
         
         return target_text_feats.unsqueeze(0)
 
     
-    def optimize_caption_and_dream(self, layer, is_vit=False, init_image=None, thresholding=True, \
+    def optimize_caption_and_dream(self, layer, init_image=None, thresholding=True, \
                                 lr=9e-3, weight_decay=1e-3, iters=1024, texts=["image"],\
                                 quiet=False, threshold=0.5, reduction=0.5, batch_size=1):
 
@@ -153,16 +147,21 @@ class Illusion(object):
             logits = self.model(self.postprocess(image))
             layer_out = hook.output
 
-            if not is_vit:
+            if not self.objective_fn.is_vit:
                 B,C,_,_ = layer_out.shape
                 layer_out = layer_out.view(B,C,-1).mean(dim=-1)
             
             if type(self.objective_fn) is ClassConditionalObjective:
-                loss = self.objective_fn(layer_out, logits, img_feats, target_text_feats)
+                losses = self.objective_fn(layer_out, logits, img_feats, target_text_feats)
             else:
-                loss = self.objective_fn(layer_out, logits)
+                losses = self.objective_fn(layer_out, logits)
+                
+            loss = losses[0]
             
-            tqdm_obj.set_postfix(loss=loss.item(), lr=img_param.get_lr())
+            if len(losses)==1:
+                tqdm_obj.set_postfix(loss=loss.item(), lr=img_param.get_lr())
+            else:
+                tqdm_obj.set_postfix(loss=loss.item(), clip=losses[1].item(), act=losses[2].item(), lr=img_param.get_lr())
             
             loss.backward()
             img_param.optimizer.step()
@@ -182,7 +181,8 @@ class Illusion(object):
 
         if thresholding:
             masks = self.objective_fn.activation_map(layer_out.detach().clone(), reduction=reduction, threshold=threshold)
-            image = image*masks
+            if not self.objective_fn.is_vit:
+                image = image*masks
         else:
             masks = self.objective_fn.activation_map(layer_out.detach().clone(), reduction=0.0, threshold=0.25)
 
@@ -263,7 +263,6 @@ class Illusion(object):
         batch_size=1,
         weight_decay=0.0,
         overwrite_experiment=True,
-        is_vit=False,
         quiet=False,
         thresholding=True,
         class_idx=None,
@@ -294,7 +293,7 @@ class Illusion(object):
                 neuron_idx, batch_size, class_indices=class_idx)
             
             # Generate CLIP-Illusion
-            images, acts, masks = self.optimize_caption_and_dream(layer, batch_size=batch_size, is_vit=is_vit, reduction=reduction, \
+            images, acts, masks = self.optimize_caption_and_dream(layer, batch_size=batch_size, reduction=reduction, \
                                                         threshold=threshold, thresholding=thresholding, lr=lr, weight_decay=weight_decay, \
                                                         iters=iters, texts=class_names, quiet=quiet)
             

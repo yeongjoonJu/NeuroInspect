@@ -1,6 +1,8 @@
-conda install pytorch==1.12.1 torchvision==0.13.1 cudatoolkit=11.6 -c pytorch
+torch==1.12.1
+torchvision==0.13.1
 timm==0.6.12
 pillow
 tqdm
 open_clip_torch
 scipy
+matplotlib
